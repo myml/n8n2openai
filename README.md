@@ -1,6 +1,6 @@
 # Cursor API Server
 
-一个兼容 OpenAI API 格式的聊天服务，支持将 Cursor 当作 OpenAI 服务，已测试 Open WebUI 兼容性。
+一个兼容 OpenAI API 格式的聊天服务，支持将 n8n chat Trigger 转为 OpenAI 接口，已测试 Open WebUI 兼容性。
 
 ## 功能特性
 
@@ -15,7 +15,6 @@
 ### 环境要求
 
 - Go 1.24.1 或更高版本
-- cursor-agent 命令行工具
 
 ### 安装依赖
 
@@ -31,16 +30,13 @@ go run .
 
 服务将在 `http://localhost:8080` 启动。
 
-
 ### 配置环境变量
 
-- CURSOR_API_KEY：CURSOR的api key，必填！！！
-- API_TOKEN：服务API鉴权，默认不开启
-- PORT：服务端口，默认8080
-- CURSOR_AGENT_PATH：cursor-agent 路径，默认 cursor-agent
-- GIN_MODE：日志打印级别 release/debug，默认debug，debug模式会打印更多日志
+- API_TOKEN：服务 API 鉴权，默认不开启
+- PORT：服务端口，默认 8080
+- GIN_MODE：日志打印级别 release/debug，默认 debug，debug 模式会打印更多日志
 
-*支持使用.env文件配置环境变量*
+_支持使用.env 文件配置环境变量_
 
 ## API 接口
 
@@ -148,10 +144,10 @@ curl -X GET http://localhost:8080/v1/models \
 
 ### 环境变量
 
-| 变量名 | 默认值 | 描述 |
-|--------|--------|------|
-| `API_TOKEN` | - | API 认证令牌（可选） |
-| `PORT` | `8080` | 服务器端口 |
+| 变量名      | 默认值 | 描述                 |
+| ----------- | ------ | -------------------- |
+| `API_TOKEN` | -      | API 认证令牌（可选） |
+| `PORT`      | `8080` | 服务器端口           |
 
 ### 认证
 

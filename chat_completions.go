@@ -3,60 +3,15 @@ package main
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
-	"os"
-	"os/exec"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
-
-func getCursorAgent() string {
-	agent := os.Getenv("CURSOR_AGENT_PATH")
-	if len(agent) > 0 {
-		return agent
-	}
-	return "cursor-agent"
-}
-
-func getCursorApiKey() (string, error) {
-	apiKey := os.Getenv("CURSOR_API_KEY")
-	if len(apiKey) > 0 {
-		return apiKey, nil
-	}
-	apiKeyUrl := os.Getenv("CURSOR_API_KEY_URL")
-	if len(apiKeyUrl) > 0 {
-		slog.Debug("get api key from url", "apiKeyUrl", apiKeyUrl)
-		resp, err := http.Get(apiKeyUrl)
-		if err != nil {
-			return "", err
-		}
-		defer resp.Body.Close()
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return "", err
-		}
-		return string(body), nil
-	}
-	apiKeyScript := os.Getenv("CURSOR_API_KEY_SCRIPT")
-	if len(apiKeyScript) > 0 {
-		slog.Debug("get api key from script", "apiKeyScript", apiKeyScript)
-		cmd := exec.Command("bash", "-c", apiKeyScript)
-		cmd.Stderr = os.Stderr
-		output, err := cmd.Output()
-		if err != nil {
-			return "", err
-		}
-		return string(output), nil
-	}
-	return "", errors.New("CURSOR_API_KEY or CURSOR_API_KEY_URL or CURSOR_API_KEY_SCRIPT is not set")
-}
 
 // 聊天完成接口
 func chatCompletionsHandler(c *gin.Context) {
@@ -69,6 +24,12 @@ func chatCompletionsHandler(c *gin.Context) {
 	}
 	slog.Debug("chatCompletionsHandler", "req", req)
 
+	models := getModels()
+	if len(models[req.Model]) == 0 {
+		slog.Error("not found model", "model", req.Model)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid model name"})
+		return
+	}
 	// 检查是否请求流式响应
 	isStream := req.Stream != nil && *req.Stream
 	if isStream {
@@ -80,41 +41,15 @@ func chatCompletionsHandler(c *gin.Context) {
 
 // 处理非流式聊天完成
 func handleNonStreamChatCompletion(c *gin.Context, req ChatCompletionRequest) {
-	apiKey, err := getCursorApiKey()
+	content := ""
+	err := n8nChat(req, func(msg N8NChatItem) error {
+		content += msg.Content
+		return nil
+	})
 	if err != nil {
-		slog.Error("getCursorApiKey", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		slog.Error("Error exec n8n Chat", "error", err)
 		return
 	}
-	cmd := exec.Command(getCursorAgent(),
-		"--model", req.Model,
-		"--api-key", apiKey,
-		"--print",
-		"--output-format", "text",
-	)
-	message := ""
-	for _, msg := range req.Messages {
-		for _, content := range msg.Content {
-			message += fmt.Sprintf("%s: %s\n", msg.Role, content.Text)
-		}
-	}
-	slog.Info("chat", "input", message)
-	cmd.Stdin = strings.NewReader(message)
-
-	out, err := cmd.CombinedOutput()
-
-	if err != nil {
-		slog.Error("error", "error", err, "out", string(out))
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	escIndex := bytes.Index(out, []byte{27})
-	if escIndex != -1 {
-		out = out[:escIndex]
-	}
-	content := string(out)
-	slog.Debug("execute cursor-agent", "input", message, "model", req.Model, "api-key", apiKey[:4]+"******", "output", content)
-	slog.Info("chat", "output", content)
 	response := ChatCompletionResponse{
 		ID:      "chatcmpl-123",
 		Object:  "chat.completion",
@@ -130,64 +65,88 @@ func handleNonStreamChatCompletion(c *gin.Context, req ChatCompletionRequest) {
 				FinishReason: "stop",
 			},
 		},
-		Usage: Usage{
-			PromptTokens:     10,
-			CompletionTokens: 20,
-			TotalTokens:      30,
-		},
 	}
 
 	c.JSON(http.StatusOK, response)
 }
 
+func n8nChat(req ChatCompletionRequest, onMessage func(msg N8NChatItem) error) error {
+	var n8nAction struct {
+		Action    string `json:"action"`
+		SessionID string `json:"sessionId"`
+		ChatInput string `json:"chatInput"`
+	}
+	n8nAction.Action = "sendMessage"
+	n8nAction.SessionID = req.User
+	var strBuilder strings.Builder
+	for _, msg := range req.Messages {
+		for _, content := range msg.Content {
+			if msg.Role != "user" {
+				slog.Warn("ignore message", "role", msg.Role, "message", content.Text)
+				continue
+			}
+			strBuilder.WriteString(fmt.Sprintf("%s: %s\n", msg.Role, content.Text))
+		}
+	}
+	n8nAction.ChatInput = strBuilder.String()
+	n8nAction.ChatInput = req.Messages[len(req.Messages)-1].Content[len(req.Messages[len(req.Messages)-1].Content)-1].Text
+	slog.Debug("n8nAction", "action", n8nAction)
+	n8nBody, err := json.Marshal(n8nAction)
+	if err != nil {
+		slog.Error("marshal n8n body", "error", err)
+		return err
+	}
+	n8nReq, err := http.NewRequest(http.MethodPost, "https://n8n.cicd.getdeepin.org/webhook/d58ddd17-1d51-4dd1-a5a5-a9fa8d4a81c3/chat", bytes.NewReader(n8nBody))
+	if err != nil {
+		slog.Error("Error new http request", "error", err)
+		return err
+	}
+	n8nReq.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(n8nReq)
+	if err != nil {
+		slog.Error("Error send http request", "error", err)
+		return err
+	}
+	defer resp.Body.Close()
+	decoder := json.NewDecoder(resp.Body)
+	var item N8NChatItem
+
+	for decoder.More() {
+		err = decoder.Decode(&item)
+		if err != nil {
+			slog.Error("Error decode chat item", "error", err)
+			return err
+		}
+		slog.Debug("n8n item", slog.Any("item", item))
+		if item.Type != "item" {
+			continue
+		}
+		// Respond to Webhook 流模式只能返回json数据，所以要解析嵌套的json字符串
+		data := []byte(item.Content)
+		if json.Valid(data) {
+			var webhookItem N8NChatItem
+			err = json.Unmarshal(data, &webhookItem)
+			if err == nil {
+				item = webhookItem
+			}
+		}
+		err = onMessage(item)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // 处理流式聊天完成
 func handleStreamChatCompletion(c *gin.Context, req ChatCompletionRequest) {
 	streamID := uuid.New().String()
-	apiKey, err := getCursorApiKey()
-	if err != nil {
-		slog.Error("getCursorApiKey", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
 	// 设置响应头为流式传输
 	c.Header("Content-Type", "text/event-stream")
 	c.Header("Cache-Control", "no-cache")
 	c.Header("Connection", "keep-alive")
 	c.Header("Access-Control-Allow-Origin", "*")
 	c.Header("Access-Control-Allow-Headers", "Cache-Control")
-
-	r, w := io.Pipe()
-	// 启动后台处理
-	go func() {
-		defer w.CloseWithError(io.EOF)
-		cmd := exec.CommandContext(c, getCursorAgent(),
-			"--model", req.Model,
-			"--api-key", apiKey,
-			"--print",
-			"--output-format", "stream-json",
-		)
-		message := ""
-		for _, msg := range req.Messages {
-			for _, content := range msg.Content {
-				message += fmt.Sprintf("%s: %s\n", msg.Role, content.Text)
-			}
-		}
-		slog.Info("chat", "input", message)
-		slog.Debug("execute cursor-agent", "streamID", streamID, "input", message, "model", req.Model, "api-key", apiKey[:4]+"******")
-
-		cmd.Stdin = strings.NewReader(message)
-		cmd.Stdout = w
-		cmd.Stderr = w
-
-		if err := cmd.Start(); err != nil {
-			w.CloseWithError(err)
-			return
-		}
-		if err := cmd.Wait(); err != nil {
-			w.CloseWithError(err)
-			return
-		}
-	}()
 
 	// 发送流式响应
 	created := time.Now().Unix()
@@ -206,39 +165,14 @@ func handleStreamChatCompletion(c *gin.Context, req ChatCompletionRequest) {
 			},
 		},
 	}
-
-	if err := sendStreamEvent(c.Writer, startEvent); err != nil {
+	err := sendStreamEvent(c.Writer, startEvent)
+	if err != nil {
 		slog.Error("Error sending start event", "error", err)
 		return
 	}
-	output := ""
-	reader := json.NewDecoder(r)
-	for {
-		var raw json.RawMessage
-		err := reader.Decode(&raw)
-		if err != nil {
-			if err != io.EOF {
-				slog.Error("Error reading from pipe", "error", err)
-			}
-			break
-		}
-		slog.Debug("execute cursor-agent", "streamID", streamID, "output", string(raw))
-		// {"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"即可"}]},"session_id":"9c2e2e59-a6cf-4af2-bdbf-72c6353b6a62"}
-		var streamJSON struct {
-			Type    string  `json:"type"`
-			Message Message `json:"message"`
-		}
-		err = json.Unmarshal(raw, &streamJSON)
-		if err != nil {
-			slog.Error("Error unmarshalling line", "error", err)
-			continue
-		}
-		if streamJSON.Type != "assistant" {
-			continue
-		}
-		if streamJSON.Type == "result" {
-			break
-		}
+
+	var output string
+	err = n8nChat(req, func(item N8NChatItem) error {
 		// 发送内容块
 		contentEvent := ChatCompletionStreamResponse{
 			ID:      streamID,
@@ -249,17 +183,23 @@ func handleStreamChatCompletion(c *gin.Context, req ChatCompletionRequest) {
 				{
 					Index: 0,
 					Delta: StreamDelta{
-						Content: &streamJSON.Message.Content[0].Text,
+						Content: &item.Content,
 					},
 				},
 			},
 		}
-		output += streamJSON.Message.Content[0].Text
+		output += item.Content
 		if err := sendStreamEvent(c.Writer, contentEvent); err != nil {
 			slog.Error("Error sending content event", "error", err)
-			return
+			return err
 		}
+		return nil
+	})
+	if err != nil {
+		slog.Error("Error exec n8n Chat", "error", err)
+		return
 	}
+
 	// 流结束，发送完成事件
 	finishReason := "stop"
 	endEvent := ChatCompletionStreamResponse{
@@ -276,6 +216,12 @@ func handleStreamChatCompletion(c *gin.Context, req ChatCompletionRequest) {
 	}
 	sendStreamEvent(c.Writer, endEvent)
 	slog.Info("chat", "output", output)
+}
+
+type N8NChatItem struct {
+	Type     string
+	Content  string
+	Metadata map[string]interface{}
 }
 
 // 发送流式事件

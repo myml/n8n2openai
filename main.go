@@ -16,6 +16,9 @@ func main() {
 	if gin.IsDebugging() {
 		slog.SetLogLoggerLevel(slog.LevelDebug)
 	}
+
+	slog.Info("find models", slog.Any("models", getModels()))
+
 	// 创建Gin路由
 	r := gin.Default()
 
