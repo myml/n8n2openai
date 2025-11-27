@@ -1,4 +1,4 @@
-# Cursor API Server
+# n8n to openai
 
 一个兼容 OpenAI API 格式的聊天服务，支持将 n8n chat Trigger 转为 OpenAI 接口，已测试 Open WebUI 兼容性。
 
@@ -35,6 +35,7 @@ go run .
 - API_TOKEN：服务 API 鉴权，默认不开启
 - PORT：服务端口，默认 8080
 - GIN_MODE：日志打印级别 release/debug，默认 debug，debug 模式会打印更多日志
+- MODELS: 模型配置以;符号做分隔符，例子：name1=n8n-webhook-url;name2=n8n-webhook-url2
 
 _支持使用.env 文件配置环境变量_
 
